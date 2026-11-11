@@ -37,5 +37,9 @@ Architect ставит задачи, проверяет результаты и 
 
 | ID | Исполнитель | Область | Результат | Статус |
 |---|---|---|---|---|
-| V1 | Cryptography Expert (не автор решений) | ADR-0003, 0004, 0005, 0007; гарантии G1–G7, G15, G16 | `docs/architecture/reviews/REVIEW_CRYPTO.md` | В работе |
-| V2 | Security Auditor (не автор решений) | Модель угроз, kill switch, сервер, автомат соединения, MTU, конфигурация | `docs/architecture/reviews/REVIEW_SECURITY.md` | В работе |
+| V1 | Cryptography Expert (не автор решений) | ADR-0003, 0004, 0005, 0007; гарантии G1–G7, G15, G16 | `docs/architecture/reviews/REVIEW_CRYPTO.md`: 3 High, 7 Medium, 5 Low, 1 Info | Завершено. Проверялось чтением документов и исходников `rustls` и `quinn-proto`; ничего не запускалось |
+| V2 | Security Auditor (не автор решений) | Модель угроз, kill switch, сервер, автомат соединения, MTU, конфигурация | `docs/architecture/reviews/REVIEW_SECURITY.md`: 4 High, 13 Medium, 2 Low, 1 Info | Завершено. Проверялось чтением документов; ничего не запускалось |
+
+| ID | Исполнитель | Область | Результат | Статус |
+|---|---|---|---|---|
+| L4 | Lead Architect | Исправление замечаний High и части Medium | `ARCHITECTURE.md` v0.2, `THREAT_MODEL.md` v0.2, `SECURITY_FINDINGS.md` | Исправления независимо не перепроверены |
