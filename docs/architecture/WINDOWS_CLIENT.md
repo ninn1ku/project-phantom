@@ -344,13 +344,261 @@
   (см. §10, сценарий «другой VPN»).
 
 ## 3. DNS
-(в работе)
 
-## 4. Маршрутизация IPv4/IPv6
-(в работе)
+### 3.1. Факты
+
+- [Факт: sdk-api `nf-netioapi-setinterfacednssettings.md`] `SetInterfaceDnsSettings(GUID, DNS_INTERFACE_SETTINGS*)`
+  задаёт DNS интерфейса; минимальная версия клиента — **Windows 10 Build 19041**
+  (2004). Флаги `DNS_SETTING_NAMESERVER` (0x2), `DNS_SETTING_IPV6` (0x1, иначе
+  настройка относится только к IPv4), `DNS_SETTING_SEARCHLIST` (0x4),
+  `DNS_SETTING_REGISTRATION_ENABLED` (0x8) и др.; поле `EnableLLMNR` — «TRUE to
+  enable mDNS and LLMNR on the given interface» [Факт: `ns-netioapi-dns_interface_settings.md`];
+  какой флаг включает применение `EnableLLMNR`, в документе не указан —
+  **[Не проверено]**. Версия 3 структуры (Build 19645+) добавляет DoH-настройки
+  (`DNS_SETTING_DOH` 0x1000).
+- [Факт] wireguard-windows: `SetInterfaceDnsSettings`, для Windows < 1809 —
+  запись `NameServer`/`SearchList` в реестр `Tcpip(6)\Parameters\Interfaces\{GUID}`
+  (`tunnel/winipcfg/luid.go`, `SetDNS`); DNS-порт 53 мимо туннеля закрыт WFP
+  (`blockDNS`).
+- [Факт] Mullvad: `SetInterfaceDnsSettings` (`talpid-dns/src/windows/iphlpapi.rs`),
+  запасной путь через реестр с `EnableMulticast = 0` (отключение LLMNR,
+  `tcpip.rs`), сброс кэша; **NRPT не используется** (поиск `nrpt`/`DnsPolicyConfig`
+  в `talpid-dns`, `talpid-core` — пусто); весь DNS ограничен отдельным
+  подслоем WFP (§2.2).
+- [Факт] Firezone: **только NRPT** — правило для всех имён в
+  `HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig\{GUID}`,
+  при наличии ключа групповой политики — дублирование туда же, потому что «If
+  this key exists, our local NRPT rules are ignored» (`dns_control/windows.rs`);
+  плюс DNS на интерфейсе «so `ipconfig` and WSL will notice them». Тест
+  `dns_control_windows.rs` с комментарием «Passes in CI but not locally».
+  Известная проблема (там же): браузер держит открытое QUIC/HTTP-соединение и не
+  разрешает имя заново.
+
+### 3.2. Решение (черновик)
+
+1. **Утечку DNS закрывает WFP, а не настройка резолвера** (как SYSTEM §2.4 для
+   Linux): фильтры §2.4 запрещают 53/853 TCP/UDP мимо Wintun и многоадресные
+   5353/5355, 137/138 [Вывод]. Это верно при любой настройке DNS, при Smart
+   Multi-Homed Name Resolution, при чужом NRPT и при ручной смене DNS
+   пользователем.
+2. **Работоспособность** — `SetInterfaceDnsSettings` на Wintun (IPv4 и IPv6
+   отдельными вызовами), адреса резолвера туннеля из подписанной конфигурации;
+   метрика Wintun 0 (§4) — чтобы клиент DNS Windows выбирал резолвер туннеля
+   первым [Предположение о порядке выбора по метрике — первоисточник не прочитан].
+   Сброс кэша после смены. Минимальная версия ОС для MVP — Windows 10 2004
+   (Build 19041) — следует из этого API; ветку реестра для старых версий не
+   делать.
+3. **NRPT «.» → DNS туннеля — не в MVP по умолчанию**, а как кандидат по итогам
+   эксперимента W-6. Причины: (а) не нужен для отсутствия утечки (п. 1);
+   (б) оставляет состояние в реестре, которое после падения и выключения
+   kill switch ломает DNS пользователя; (в) локальные правила NRPT
+   игнорируются при наличии групповой политики (по Firezone). Если без NRPT
+   разрешение имён медленное или ненадёжное (параллельные запросы к
+   заблокированным резолверам физических интерфейсов) — включить NRPT с
+   обязательной очисткой в `disconnect`, при старте службы (сверка) и в
+   деинсталляторе.
+4. **Smart Multi-Homed Name Resolution / параллельные запросы.** Как именно
+   Windows рассылает запросы по интерфейсам, по первоисточнику не прочитано
+   **[Не проверено]**. Для PHANTOM это вопрос задержки, не утечки (п. 1):
+   запросы к резолверам физических интерфейсов блокируются WFP. Проверка — тест
+   T-DNS-1 (§13) с захватом на физическом адаптере.
+5. **LLMNR, mDNS, NetBIOS.** На Wintun — `EnableLLMNR = FALSE` (и/или
+   `EnableMulticast = 0` по образцу Mullvad); мимо туннеля — WFP-блок по портам
+   и групповым адресам. NetBIOS over TCP/IP на Wintun — отключить через
+   `NetbiosOptions` интерфейса **[Не проверено: способ и необходимость]**.
+6. **DoH браузеров.** Браузер с включённым DoH ходит к своему провайдеру DoH по
+   443 — **через туннель** (весь трафик туннелирован), поэтому это не утечка мимо
+   туннеля; но имена видит провайдер DoH, а не резолвер PHANTOM. Запретить DoH
+   браузерам надёжно нельзя (это обычный HTTPS) — **не обещаем**; в диагностике
+   можно сообщать «DNS браузера может идти не через резолвер PHANTOM». Windows
+   DoH (`DNS_SETTING_DOH` на физическом интерфейсе) — запросы идут по маршруту в
+   туннель или блокируются WFP [Вывод].
+7. **Имя сервера** — в MVP IP-адрес (SYSTEM §3.2); имя разрешается только в
+   `off` при `connect`.
+
+
+## 4. Маршрутизация IPv4 и IPv6
+
+### 4.1. Факты
+
+- [Факт: wireguard-windows `tunnel/addressconfig.go`] При `0.0.0.0/0` или `::/0`
+  в AllowedIPs: маршрут с `Metric = 0` на интерфейс туннеля, у IP-интерфейса
+  `UseAutomaticMetric = false`, `Metric = 0`; маршруты ставятся
+  `SetRoutesForFamily`; при старте во время загрузки — повторы до 15 раз на
+  `ERROR_NOT_FOUND`.
+- [Факт: wireguard-windows `tunnel/pitfalls.go`, `pitfallWeakHostSend`]
+  Предупреждение: если на интерфейсе, через который лежит маршрут к endpoint,
+  включены Forwarding/WeakHostSend, а итоговый маршрут к endpoint ведёт в
+  туннель, — «will cause routing loops». [Вывод] WireGuard не ставит отдельный
+  маршрут к серверу, а полагается на привязку сокета к физическому интерфейсу.
+- [Факт: Mullvad `talpid-wireguard/src/lib.rs`, `get_endpoint_route`] На
+  не-Linux ставится маршрут хоста к endpoint через `NetNode::DefaultNode`
+  (лучший маршрут по умолчанию физической сети); `talpid-routing/src/windows/route_manager.rs`
+  при смене лучшего default **удаляет и заново добавляет** такие маршруты;
+  монитор — `NotifyRouteChange2`, `NotifyIpInterfaceChange`,
+  `NotifyUnicastIpAddressChange` (`default_route_monitor.rs`), с защитой от
+  всплесков событий.
+- [Факт: MS `ipproto-ip-socket-options.md`, `ipproto-ipv6-socket-options.md`]
+  `IP_UNICAST_IF` — «Gets or sets the outgoing interface for sending IPv4
+  traffic. This option does not change the default interface for receiving»;
+  значение — индекс интерфейса **в сетевом порядке байт**. `IPV6_UNICAST_IF` —
+  индекс **в порядке байт хоста**. Ошибка порядка байт — типичная ловушка.
+- [Факт: sdk-api `netioapi`] `NotifyRouteChange2` — изменения маршрутов;
+  `NotifyIpInterfaceChange` — изменения IP-интерфейсов;
+  `NotifyUnicastIpAddressChange` — изменения unicast-адресов.
+- [Факт: Firezone `network_changes/windows.rs`] Ручные замеры задержки
+  обнаружения смены сети (Wi-Fi ↔ хот-спот, подключение Ethernet и т. д.) и
+  случаи, которые **не** обнаруживаются (например, «On Ethernet and Wi-Fi,
+  disconnect Ethernet, not detected»). Их числа к PHANTOM не переносятся.
+
+### 4.2. Решение (черновик)
+
+1. **Маршрут по умолчанию**: `0.0.0.0/0` и `::/0` на Wintun с метрикой маршрута 0
+   и метрикой интерфейса 0 (`UseAutomaticMetric = false`) — как WireGuard.
+   Альтернатива `0.0.0.0/1 + 128.0.0.0/1` (`::/1 + 8000::/1`) побеждает любой
+   `/0` без сравнения метрик, но (а) не помогает против более узких маршрутов
+   (option 121), (б) влияет на определение «есть Интернет» в Windows
+   **[Не проверено]**. Выбор — эксперимент W-5; **утечку в обоих вариантах
+   закрывает WFP**, маршрутизация влияет только на работоспособность.
+2. **IPv6**: если сервер выдаёт IPv6 — `::/0` в туннель; если нет — IPv6-адреса и
+   маршрута на Wintun нет, весь IPv6 мимо туннеля блокирует WFP (вес 0).
+3. **Сокеты транспорта (T1 UDP, T2 TCP)**: перед `connect`/первой отправкой —
+   `IP_UNICAST_IF`/`IPV6_UNICAST_IF` на индекс выбранного физического интерфейса.
+   Отдельный маршрут хоста к серверу **не ставится** (нет системного состояния,
+   которое нужно чистить после падения). Если W-5 покажет, что привязки
+   недостаточно (например, выбор следующего узла всё равно идёт по `/0` туннеля),
+   — запасной вариант Mullvad: маршрут хоста `/32` (`/128`) к каждому адресу
+   сервера через шлюз лучшего физического default, пересоздаваемый по событиям.
+4. **Выбор физического интерфейса**: лучший default-маршрут без Wintun
+   (`GetIpForwardTable2`, минимум «метрика маршрута + метрика интерфейса», только
+   интерфейсы в `IfOperStatusUp`) — логика как в `pitfallWeakHostSend` и
+   `get_best_default_route.rs`. Пересчёт по трём уведомлениям с подавлением
+   всплесков (например, 500 мс — стартовое значение). Смена интерфейса →
+   событие `NetworkChanged` в автомат клиента (TRANSPORT §7.2: T1 — rebind +
+   SizeProbe, T2 — новое соединение).
+5. **Проверка WeakHostSend/Forwarding** физических интерфейсов — предупреждение в
+   диагностике (как `pitfalls.go`).
+6. **TunnelVision-подобные атаки (DHCP option 121, маршруты из RA).** Windows
+   ставит бесклассовые маршруты DHCP в таблицу маршрутов; они уже `/0` туннеля
+   и уводят выбранные префиксы на физический интерфейс [Вывод из правила
+   наибольшего совпадения префикса]. **Утечки нет**: ALE-фильтры разрешают
+   мимо Wintun только процесс службы к адресу сервера; остальное — block (вес 0).
+   Остаток: выборочный **отказ** в доступе к этим префиксам и наблюдаемость
+   попыток (аналог SYSTEM §3.5, RR14). Служба при каждом `NotifyRouteChange2`
+   ищет маршруты не через Wintun, которые перекрывают адреса вне LAN, и
+   сообщает наблюдение «сеть объявила маршруты в обход туннеля; трафик к ним
+   запрещён». Удалять чужие маршруты не следует (их вернёт DHCP-клиент).
+7. **MTU** — §1.2.
+
 
 ## 5. Служба Windows (SCM)
-(в работе)
+
+### 5.1. Минимальные права — что требуется
+
+- **WFP**: DACL движка по умолчанию — `GENERIC_ALL` Администраторам,
+  `GRGWGX` группе Network Configuration Operators и SID нескольких системных
+  служб (MpsSvc, PolicyAgent и др.); всем — только `OPEN` и `CLASSIFY`
+  [Факт: MS-FWP `access-control.md`]. LocalService (минимальные привилегии,
+  анонимен в сети [Факт: `localservice-account.md`]) и виртуальная учётная
+  запись службы не входят в эти группы → **не могут** добавлять фильтры
+  [Вывод].
+- **Wintun**: регистрация колец — только `SY` и `BA` с высоким уровнем
+  целостности (§1.1); создание адаптера — установка устройства [Вывод].
+- Изменение маршрутов, адресов, `SetIpInterfaceEntry`, DNS — права
+  администратора [Предположение: страницы API не говорят явно; на практике
+  WireGuard, Mullvad, Firezone выполняют их из службы LocalSystem].
+- **Вывод:** минимально возможная учётная запись для привилегированной части —
+  **LocalSystem**. Сужение — через SCM:
+  - `SERVICE_SID_TYPE_UNRESTRICTED` — SID службы `NT SERVICE\PhantomService` в
+    токене с `SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER` [Факт:
+    `ns-winsvc-service_sid_info.md`]; нужен для WFP-условия `ALE_USER_ID` (§2.4)
+    и ACL файлов/канала.
+  - `SERVICE_REQUIRED_PRIVILEGES_INFO` — SCM удаляет из токена всё, что не
+    перечислено («It is best to analyze your service and use the minimum set of
+    privileges required») [Факт: `ns-winsvc-service_required_privileges_infow.md`].
+    Точный минимальный набор (вероятно `SeLoadDriverPrivilege` для первой
+    установки драйвера Wintun — WireGuard сохраняет именно его,
+    `elevate/privileges.go`, `DropAllPrivileges(retainDriverLoading)`) —
+    **[Не проверено]**, эксперимент W-2.
+  - Сброс прочих привилегий после инициализации — `AdjustTokenPrivileges` с
+    `SE_PRIVILEGE_REMOVED` (подход WireGuard) [Факт: `elevate/privileges.go`].
+
+### 5.2. Разделение процессов (отличие от Linux, ADR-0014)
+
+На Linux сторож с привилегиями не разбирает сеть, демон туннеля без привилегий
+(SYSTEM §2.5). На Windows прямой перенос дорог: кольца Wintun может
+регистрировать только SYSTEM/Администратор, поэтому непривилегированный
+процесс не может читать и писать пакеты — их пришлось бы пересылать между
+процессами (общая память или канал) с лишним копированием. Все три
+рассмотренных продукта (WireGuard: туннельная служба LocalSystem со сбросом
+привилегий; Mullvad: демон; Firezone: «tunnel service») держат разбор сети в
+привилегированном процессе [Факт: прочитанные файлы §2.2, §1.4; для Firezone —
+наличие `windows-service` в `rust/Cargo.toml` и тест «Tunnel service rejects a
+non-allowlisted GUI» в `_tauri.yml`].
+
+Варианты для решения Lead Architect (нужен ADR):
+
+| Вариант | Безопасность | Цена |
+|---|---|---|
+| W-A. Один процесс `phantom-service` (LocalSystem, сокращённые привилегии, SID службы) | компрометация разборщика TLS/QUIC = SYSTEM | минимальная; как у эталонов |
+| W-B. `phantom-service` (сторож: WFP, Wintun, маршруты, DNS) + `phantom-netd` — вторая служба с виртуальной учётной записью `NT SERVICE\PhantomNetd` (без админ-прав); пакеты через общую память; сокеты транспорта открывает `phantom-netd`, WFP-разрешение по его SID | граница как на Linux | копирование пакетов (не измерено), сложность, второй сервис |
+
+**Рекомендация (черновик): W-A для MVP** с правилами SYSTEM §3.9 (без `unwrap`/
+`panic` в разборе, fuzz) и явной записью отступления от ADR-0014 в ADR; W-B —
+после измерения стоимости копирования (стенд C). [Вывод]
+
+### 5.3. Конфигурация службы
+
+| Параметр | Значение | Обоснование |
+|---|---|---|
+| Тип | `SERVICE_WIN32_OWN_PROCESS` | как WireGuard (`manager/install.go`) |
+| Запуск | `SERVICE_AUTO_START` (не delayed) | persistent-объекты провайдера применяются BFE, только если служба провайдера «set to auto-start» (§2.1); считается ли delayed auto-start — **[Не проверено]** |
+| Зависимости | `BFE`, `Nsi`, `TcpIp` | WireGuard: `Nsi`, `TcpIp`; `BFE` — наш [Вывод] |
+| Учётная запись | LocalSystem | §5.1 |
+| SID службы | `SERVICE_SID_TYPE_UNRESTRICTED` | §5.1 |
+| Привилегии | `SERVICE_REQUIRED_PRIVILEGES_INFO` — минимум | §5.1 |
+| Recovery | рестарт через 0 с, 1 с, 5 с; сброс счётчика через 1 сутки; `fFailureActionsOnNonCrashFailures = TRUE` («failure actions are queued if the service process terminates without reporting SERVICE_STOPPED or … dwWin32ExitCode is not ERROR_SUCCESS») [Факт: `ns-winsvc-service_failure_actions_flag.md`] | падение = рестарт; ненулевой код выхода тоже |
+| Принимаемые команды | `STOP`, `PRESHUTDOWN` (или `SHUTDOWN`), `POWEREVENT` | ниже |
+| Путь exe | `%ProgramFiles%\PHANTOM\phantom-service.exe`, ACL каталога — запись только SYSTEM и Администраторам | `ALE_APP_ID`, защита DLL (§1.4) |
+
+Крейт **`windows-service`** 0.8.1 (MIT OR Apache-2.0, сопровождает Mullvad,
+обновлён 2026-05-08; используют Firezone `rust/Cargo.toml` и Mullvad) —
+поддерживает `ServiceControl::PowerEvent(PowerEventParam::{Suspend,
+ResumeAutomatic, ResumeSuspend, …})`, `Preshutdown`, `ServiceSidType`,
+`set_failure_actions_on_non_crash_failures` [Факт: `windows-service-rs/src/service.rs`].
+Обязательные привилегии (`SERVICE_REQUIRED_PRIVILEGES_INFO`) в крейте не найдены
+поиском — вызвать `ChangeServiceConfig2W` через `windows-sys` **[Не проверено]**.
+
+### 5.4. Поведение (нормативный черновик)
+
+1. **Остановка службы командой `STOP`** (в том числе обновлением) **не снимает**
+   kill switch: static-разрешения удаляются, persistent/boot-time block-all
+   остаются, если состояние `enforcing` (аналог SYSTEM §1.4 п. 4 и
+   `CleanupPolicy::BlockingPersistent` Mullvad, но persistent-запрет стоит с
+   момента `enforcing`, а не только при остановке).
+2. **Падение** — фильтры остаются (static + persistent), Wintun-кольца снимает
+   драйвер (§1.3), SCM перезапускает службу; новая служба сверяет объекты WFP
+   (§2.3 п. 4), пересоздаёт адаптер, восстанавливает соединение.
+3. **Сон и пробуждение**: `SERVICE_ACCEPT_POWEREVENT`; на `PBT_APMSUSPEND` —
+   ничего не снимать (фильтры — состояние BFE); на `PBT_APMRESUMEAUTOMATIC` —
+   событие `Resumed` в автомат (TRANSPORT §7.4: проба живости + SizeProbe).
+   Firezone выбирает именно `PBT_APMRESUMEAUTOMATIC`, потому что
+   `PBT_APMRESUMESUSPEND` приходит только при присутствии пользователя
+   [Факт: `power/windows.rs`]. Дополнительно — признак по скачку времени
+   (TRANSPORT §7.4).
+4. **Смена сети** — §4.2 п. 4.
+5. **Перезагрузка в `enforcing`**: boot-time block-all до старта BFE,
+   persistent block-all после; служба стартует автоматически, ставит
+   разрешения. Окно без защиты отсутствует **по документации** (§2.1);
+   подтверждение — только ручной чек-лист владельца (перезагрузка на GitHub
+   Actions невозможна, §11).
+6. **Состояние** `off|enforcing` — файл в `%ProgramData%\PHANTOM\state\`
+   (ACL: SYSTEM и SID службы — полный доступ, Администраторы — чтение), запись
+   атомарно (`ReplaceFileW` или запись во временный + `MoveFileExW(…,
+   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`) [API — **Не проверено**
+   по документации]. Источник истины для WFP — сами объекты BFE; файл нужен для
+   сверки после перезапуска.
+
 
 ## 6. Взаимодействие GUI ↔ служба
 (в работе)
