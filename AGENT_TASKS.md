@@ -43,3 +43,22 @@ Architect ставит задачи, проверяет результаты и 
 | ID | Исполнитель | Область | Результат | Статус |
 |---|---|---|---|---|
 | L4 | Lead Architect | Исправление замечаний High и части Medium | `ARCHITECTURE.md` v0.2, `THREAT_MODEL.md` v0.2, `SECURITY_FINDINGS.md` | Исправления независимо не перепроверены |
+
+## Вторая волна: независимая проверка и спецификация (2026-11-12 … 2026-11-14)
+
+Первый запуск семи потоков оборвался лимитом до записи результатов. Повторный
+запуск выполнен другой моделью, двумя волнами. Тесты не запускались: кода нет.
+
+| ID | Исполнитель | Результат | Метод | Проверка Lead Architect |
+|---|---|---|---|---|
+| V3 | Security Auditor (не автор) | `docs/architecture/reviews/REVERIFY_HIGH.md`: 4 «достаточно с оговорками», 1 «недостаточно»; V-01…V-09 | Документы, исходники `rustls` и `quinn`, файлы пакета nftables | Итоги прочитаны; выводы внесены в журнал. Отчёт целиком не читался |
+| K1 | Cryptography Expert (не автор) | `docs/protocol-spec/CRYPTO_PROFILE.md` | RFC прочитаны напрямую; исходники библиотек; база RustSec | Прочитаны таблица профиля и раздел практических проверок; предложение о raw public keys принято (ADR-0013) |
+| N1 | Network Engineer (не автор) | `docs/protocol-spec/TRANSPORT_AND_SESSION.md` | RFC и исходники `quinn` | Прочитаны формат, сообщения, активация, состояния автомата |
+| Y1 | Системный архитектор (не автор) | `docs/architecture/SYSTEM_AND_LEAK_PROTECTION.md` | Исходники ядра, unit-файлы, `nft -c` | Прочитаны раздел о kill switch и сводка решений. Поток оборвался лимитом после записи документа; итогового отчёта исполнителя нет |
+| A1 | Исследователь клиентов | `docs/architecture/CLIENT_COMPATIBILITY.md` | Репозитории INCY, Happ, Xray-core, sing-box | По итоговому отчёту исполнителя |
+| T1 | Специалист по сетевым угрозам (не автор модели) | `docs/threat-model/REVIEW_THREAT_MODEL.md`, `docs/research/08-availability-loss-causes.md` | Документы, RFC, полные тексты публикаций USENIX | По итоговому отчёту исполнителя |
+| Q1 | QA & Performance Engineer | `docs/testing/TEST_STRATEGY.md` | Документы проекта | По итоговому отчёту; матрица написана по архитектуре v0.2 (N-15) |
+| I1 | Интегратор | `docs/architecture/ARCHITECTURE.md` v0.3; 16 расхождений | Только документы проекта | Расхождения разрешены в `RECONCILIATION.md` |
+| I2 | Интегратор | `docs/threat-model/THREAT_MODEL.md` 1.0-rc | Только документы проекта | Неприменённые правки M-07, M-08, M-16 разрешены (N-17…N-19); остальные — в открытых вопросах |
+| L5 | Lead Architect | `RECONCILIATION.md`, ADR-0012…0015, `OPUS_5_5_MASTER_HANDOFF.md`, журналы | — | Независимо не проверялось |
+
